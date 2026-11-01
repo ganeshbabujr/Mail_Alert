@@ -79,8 +79,8 @@
     #hudDiffVal, #hudHoldVal, #hudLumVal, #hudBattVal { font-size: 12px; }
     #roiResizeHandle { width: 32px; height: 32px; right: -14px; bottom: -14px; }
     #roiResizeHandle::after { content: ''; position: absolute; inset: -8px; }
-    #roiBox.roi-armed { border-color: #f59e0b !important; background: rgba(245,158,11,.08) !important; box-shadow: 0 0 22px rgba(245,158,11,.35) !important; }
-    #roiBox.roi-triggered { border-color: #ef4444 !important; background: rgba(239,68,68,.15) !important; box-shadow: 0 0 26px rgba(239,68,68,.55) !important; }
+    #roiBox.roi-armed { border-color: #f59e0b !important; background: transparent !important; box-shadow: none !important; }
+    #roiBox.roi-triggered { border-color: #ef4444 !important; background: transparent !important; box-shadow: none !important; }
     input[type="range"] { height: 8px; touch-action: pan-y; }
     input[type="range"]::-webkit-slider-thumb { width: 26px; height: 26px; }
     :focus-visible { outline: 2px solid #22d3ee; outline-offset: 2px; }
@@ -189,6 +189,8 @@
         </button>
       </div>
 
+      <button onclick="resetRoi()" class="absolute top-2 right-2 z-10 px-2 py-1 rounded bg-zinc-950/80 border border-zinc-700 text-[11px] text-cyan-300">⟲ Reset box</button>
+
       <!-- Camera Permission / Error Overlay -->
       <div id="cameraOverlayMsg" class="hidden absolute inset-0 bg-zinc-950/95 flex flex-col items-center justify-center p-4 text-center z-20">
         <p id="cameraErrorText" class="text-xs text-zinc-300 mb-3">Rear camera access is required to watch your monitor folder or alert icon.</p>
@@ -267,6 +269,9 @@
           <button onclick="recaptureBaseline()" class="px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-[11px] font-semibold text-cyan-300 border border-zinc-700 whitespace-nowrap">
             🔄 Re-Snap Base
           </button>
+          <button onclick="resetRoi()" class="px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-[11px] font-semibold text-amber-300 border border-zinc-700 whitespace-nowrap">
+            ⤾ Reset ROI
+          </button>
         </div>
 
         <!-- Alarm Sound & Voice TTS Selector -->
@@ -288,6 +293,21 @@
           </select>
           <p class="text-[10px] text-zinc-500">Also set phone media volume to max. A web page cannot raise it.</p>
         </div>
+
+        <label class="flex items-center justify-between bg-zinc-950/80 p-2 rounded-lg border border-zinc-800/80 cursor-pointer">
+          <div>
+            <p class="text-xs font-semibold text-zinc-200">🔒 Lock camera exposure when armed</p>
+            <p class="text-[10px] text-zinc-400">Experimental. Leave off if the picture looks dim or blurry.</p>
+          </div>
+          <input id="expLockToggle" type="checkbox" class="w-4 h-4 accent-cyan-400 rounded" />
+        </label>
+        <label class="flex items-center justify-between bg-zinc-950/80 p-2 rounded-lg border border-zinc-800/80 cursor-pointer">
+          <div>
+            <p class="text-xs font-semibold text-zinc-200">🔌 Charger alerts</p>
+            <p class="text-[10px] text-zinc-400">Warns if the phone is not charging for 10 s while armed. The top bar shows ⚡ when charging.</p>
+          </div>
+          <input id="chargerAlertToggle" type="checkbox" checked onchange="scheduleChargerCheck()" class="w-4 h-4 accent-cyan-400 rounded" />
+        </label>
 
         <!-- Sensitivity Threshold Slider -->
         <div class="space-y-1">
@@ -601,7 +621,7 @@
       const c = t.getCapabilities();
       const st = t.getSettings ? t.getSettings() : {};
       let adv = null;
-      if (on) {
+      if (on && document.getElementById('expLockToggle').checked) {
         if (c.exposureMode && c.exposureMode.includes('manual') && typeof st.exposureTime === 'number' && st.exposureTime > 0) {
           adv = { exposureMode: 'manual', exposureTime: st.exposureTime };
           if (c.iso && typeof st.iso === 'number') adv.iso = st.iso;
@@ -677,7 +697,38 @@
       saveLocalPrefs();
     }
 
+    function clampRoi() {
+      const r = state.roi;
+      r.w = Math.min(0.8, Math.max(0.10, Number(r.w) || 0.4));
+      r.h = Math.min(0.6, Math.max(0.08, Number(r.h) || 0.22));
+      r.x = Math.min(0.98 - r.w, Math.max(0.02, Number(r.x) || 0.3));
+      r.y = Math.min(0.98 - r.h, Math.max(0.02, Number(r.y) || 0.38));
+    }
+
+    function resetRoi() {
+      state.roi = { x: 0.30, y: 0.38, w: 0.40, h: 0.22 };
+      syncRoiUI();
+      if (state.isArmed) recaptureBaseline();
+    }
+
+    function clampRoi() {
+      const d = { x: 0.30, y: 0.38, w: 0.40, h: 0.22 };
+      if (![state.roi.x, state.roi.y, state.roi.w, state.roi.h].every(Number.isFinite)) state.roi = d;
+      const r = state.roi;
+      r.w = Math.min(Math.max(r.w, 0.10), 0.96);
+      r.h = Math.min(Math.max(r.h, 0.08), 0.90);
+      r.x = Math.min(Math.max(r.x, 0.02), 0.98 - r.w);
+      r.y = Math.min(Math.max(r.y, 0.02), 0.96 - r.h);
+    }
+    function resetRoi() {
+      state.roi = { x: 0.30, y: 0.38, w: 0.40, h: 0.22 };
+      syncRoiUI();
+      if (state.isArmed) recaptureBaseline();
+    }
+
     function syncRoiUI() {
+      clampRoi();
+      clampRoi();
       roiBox.style.left = (state.roi.x * 100).toFixed(1) + '%';
       roiBox.style.top = (state.roi.y * 100).toFixed(1) + '%';
       roiBox.style.width = (state.roi.w * 100).toFixed(1) + '%';
@@ -996,7 +1047,7 @@
         if ('vibrate' in navigator) navigator.vibrate(40);
         state.wdStale = 0;
         state.wdLastTime = -1;
-        if (state.batteryPct !== null && !state.batteryCharging) setFault('charger', 'Not charging. Plug the phone in for overnight use.');
+        scheduleChargerCheck();
         roiBox.classList.add('roi-armed');
       } else {
         stopSirenAndVibration();
@@ -1325,8 +1376,7 @@
           state.batteryPct = Math.round(batt.level * 100);
           const wasCharging = state.batteryCharging;
           state.batteryCharging = batt.charging;
-          if (batt.charging) clearFault('charger');
-          else if (state.isArmed && wasCharging) setFault('charger', `Charger unplugged. Battery at ${state.batteryPct}%.`);
+          scheduleChargerCheck();
           const el = document.getElementById('hudBattVal');
           el.textContent = `${state.batteryPct}%${batt.charging ? '⚡' : ''}`;
           el.className = state.batteryPct <= 20 && !batt.charging
@@ -1470,6 +1520,16 @@
     /********************************************************************
      * 8. FAULT BANNER, CAMERA WATCHDOG, SAVED SETUP & AUTO RE-ARM
      ********************************************************************/
+    function scheduleChargerCheck() {
+      clearTimeout(state.chargerTimer);
+      const on = document.getElementById('chargerAlertToggle').checked;
+      if (!on || !state.isArmed || state.batteryPct === null || state.batteryCharging) { clearFault('charger'); return; }
+      state.chargerTimer = setTimeout(() => {
+        if (state.isArmed && !state.batteryCharging && document.getElementById('chargerAlertToggle').checked)
+          setFault('charger', `Phone is not charging (battery ${state.batteryPct}%). Check the cable.`);
+      }, 10000);
+    }
+
     function loudMax() { return document.getElementById('loudnessSelect').value !== 'ramp'; }
     try { const v = localStorage.getItem('roi_loudness'); if (v) document.getElementById('loudnessSelect').value = v; } catch (e) {}
 
