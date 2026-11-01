@@ -595,13 +595,21 @@
     }
 
     async function lockCameraExposure(on) {
+      // Freeze exposure at the values the camera is ALREADY using. Never touch focus (manual focus caused blur).
       const t = state.videoTrack;
       if (!t || !t.getCapabilities) return;
       const c = t.getCapabilities();
-      const adv = {};
-      if (c.exposureMode && c.exposureMode.includes('manual')) adv.exposureMode = on ? 'manual' : 'continuous';
-      if (c.focusMode && c.focusMode.includes('manual')) adv.focusMode = on ? 'manual' : 'continuous';
-      if (Object.keys(adv).length) { try { await t.applyConstraints({ advanced: [adv] }); } catch (e) {} }
+      const st = t.getSettings ? t.getSettings() : {};
+      let adv = null;
+      if (on) {
+        if (c.exposureMode && c.exposureMode.includes('manual') && typeof st.exposureTime === 'number' && st.exposureTime > 0) {
+          adv = { exposureMode: 'manual', exposureTime: st.exposureTime };
+          if (c.iso && typeof st.iso === 'number') adv.iso = st.iso;
+        }
+      } else if (c.exposureMode && c.exposureMode.includes('continuous')) {
+        adv = { exposureMode: 'continuous' };
+      }
+      if (adv) { try { await t.applyConstraints({ advanced: [adv] }); } catch (e) {} }
     }
 
     function switchCamera() {
