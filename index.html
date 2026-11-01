@@ -147,6 +147,11 @@
 
     <button id="faultBanner" onclick="ackFaults()" role="status" aria-live="polite" class="hidden w-full text-left px-3 py-2.5 rounded-xl bg-amber-500/15 border border-amber-400/50 text-amber-200 text-xs font-semibold"></button>
 
+    <div id="sourceTabs" role="tablist" class="grid grid-cols-2 gap-1 p-1 bg-zinc-900 rounded-xl border border-zinc-800">
+      <button id="srcCamBtn" role="tab" onclick="setSourceMode('camera')">📱 Phone camera</button>
+      <button id="srcScrBtn" role="tab" onclick="setSourceMode('screen')">🖥️ Laptop screen</button>
+    </div>
+
     <!-- CAMERA VIEWPORT CARD -->
     <div class="relative rounded-xl overflow-hidden bg-black border border-zinc-800 shadow-lg aspect-[4/3] w-full">
       <!-- Live Video Element (scaled via CSS when using software crop/zoom fallback) -->
@@ -176,7 +181,7 @@
       </div>
 
       <!-- Floating Camera Controls Overlay -->
-      <div class="absolute bottom-2 left-2 right-2 flex items-center justify-between gap-2 bg-zinc-950/85 backdrop-blur-md px-2.5 py-1.5 rounded-lg border border-zinc-800/80">
+      <div id="camControls" class="absolute bottom-2 left-2 right-2 flex items-center justify-between gap-2 bg-zinc-950/85 backdrop-blur-md px-2.5 py-1.5 rounded-lg border border-zinc-800/80">
         <div class="flex items-center gap-2 flex-1">
           <span class="text-[11px] mono text-cyan-400 whitespace-nowrap">🔍 <span id="zoomLabel">1.0x</span></span>
           <input id="zoomSlider" type="range" min="1" max="6" step="0.1" value="1" class="w-full" oninput="handleZoomChange(this.value)" />
@@ -194,9 +199,7 @@
       <!-- Camera Permission / Error Overlay -->
       <div id="cameraOverlayMsg" class="hidden absolute inset-0 bg-zinc-950/95 flex flex-col items-center justify-center p-4 text-center z-20">
         <p id="cameraErrorText" class="text-xs text-zinc-300 mb-3">Rear camera access is required to watch your monitor folder or alert icon.</p>
-        <button onclick="initCamera()" class="px-4 py-2 rounded-lg bg-cyan-400 text-zinc-950 font-bold text-xs">
-          Enable Rear Camera
-        </button>
+        <button id="overlayActionBtn" onclick="startSource()" class="px-4 py-2 rounded-lg bg-cyan-400 text-zinc-950 font-bold text-xs"><span id="overlayActionText">Enable Rear Camera</span></button>
       </div>
     </div>
 
@@ -495,7 +498,7 @@
       isBlackoutAlert: false,
       isTestSiren: false,
       sirenMuted: false,
-      faults: {}, faultTimer: null,
+      faults: {}, faultTimer: null, sourceMode: 'camera', chargerTimer: null,
       wdLastTime: -1, wdStale: 0,
       savedZoom: null, resumeArm: false, persistReady: false,
       master: null, escTimer: null, alarmStart: 0, escalated: false, modeOverride: null,
@@ -606,7 +609,7 @@
       const vw = video.videoWidth, vh = video.videoHeight;
       const cw = video.clientWidth || 1, ch = video.clientHeight || 1;
       const z = state.supportsHardwareZoom ? 1 : state.zoomLevel;
-      const sc = Math.max(cw / vw, ch / vh); // object-cover scale
+      const sc = state.sourceMode === 'screen' ? Math.min(cw / vw, ch / vh) : Math.max(cw / vw, ch / vh);
       const ox = (cw - vw * sc) / 2, oy = (ch - vh * sc) / 2;
       const map = (x, y) => [((cw / 2 + (x - cw / 2) / z) - ox) / sc, ((ch / 2 + (y - ch / 2) / z) - oy) / sc];
       const [x0, y0] = map(state.roi.x * cw, state.roi.y * ch);
@@ -630,6 +633,86 @@
         adv = { exposureMode: 'continuous' };
       }
       if (adv) { try { await t.applyConstraints({ advanced: [adv] }); } catch (e) {} }
+    }
+
+    function applySourceUI() {
+      const scr = state.sourceMode === 'screen';
+      const canShare = !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+      document.getElementById('sourceTabs').classList.toggle('hidden', !canShare);
+      const on = 'py-2 rounded-lg text-xs font-bold bg-cyan-400 text-zinc-950';
+      const off = 'py-2 rounded-lg text-xs font-semibold text-zinc-300';
+      document.getElementById('srcCamBtn').className = scr ? off : on;
+      document.getElementById('srcScrBtn').className = scr ? on : off;
+      document.getElementById('srcCamBtn').setAttribute('aria-selected', String(!scr));
+      document.getElementById('srcScrBtn').setAttribute('aria-selected', String(scr));
+      video.style.objectFit = scr ? 'contain' : 'cover';
+      video.style.transform = 'scale(1)';
+      state.zoomLevel = 1;
+      document.getElementById('camControls').classList.toggle('hidden', scr);
+      roiBox.parentElement.style.aspectRatio = '';
+      document.getElementById('overlayActionText').textContent = scr ? 'Share screen' : 'Enable Rear Camera';
+      if (scr) {
+        document.getElementById('cameraErrorText').textContent =
+          'Click Share screen, then pick the Outlook window (or your whole screen). Drag the box over the folder badge.';
+        if (!state.stream) document.getElementById('cameraOverlayMsg').classList.remove('hidden');
+        document.getElementById('subStatusText').textContent = 'Watching a shared laptop screen';
+      } else {
+        document.getElementById('cameraErrorText').textContent = 'Rear camera access is required to watch your monitor folder or alert icon.';
+        document.getElementById('subStatusText').textContent = '100% Offline Local Screen Watcher';
+      }
+    }
+
+    function setSourceMode(mode) {
+      if (mode === state.sourceMode) return;
+      if (state.isArmed) toggleArmMonitor();
+      if (state.stream) { state.stream.getTracks().forEach(t => t.stop()); state.stream = null; state.videoTrack = null; }
+      video.srcObject = null;
+      state.sourceMode = mode;
+      state.frameBuffer = [];
+      state.baselineFrame = null;
+      applySourceUI();
+      startSource();
+    }
+
+    function startSource() {
+      if (state.sourceMode === 'screen') startScreenCapture(); else initCamera();
+    }
+
+    async function startScreenCapture() {
+      const overlay = document.getElementById('cameraOverlayMsg');
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 5, max: 10 } }, audio: false });
+        if (state.stream) state.stream.getTracks().forEach(t => t.stop());
+        state.stream = stream;
+        state.frameBuffer = [];
+        state.baselineFrame = null;
+        video.srcObject = stream;
+        await video.play().catch(() => {});
+        if (!video.videoWidth) await new Promise(r => { video.onloadedmetadata = () => r(); setTimeout(r, 2000); });
+        if (video.videoWidth) roiBox.parentElement.style.aspectRatio = video.videoWidth + ' / ' + video.videoHeight;
+        overlay.classList.add('hidden');
+        const [track] = stream.getVideoTracks();
+        state.videoTrack = track;
+        state.supportsHardwareZoom = false;
+        state.supportsTorch = false;
+        track.addEventListener('ended', () => {
+          if (state.videoTrack !== track) return;
+          setFault('camera', 'Screen sharing stopped. Click Share screen to resume. Monitoring is not working.');
+          document.getElementById('cameraErrorText').textContent = 'Screen sharing stopped. Click Share screen and pick the Outlook window again.';
+          overlay.classList.remove('hidden');
+        });
+        clearFault('camera');
+        if (state.resumeArm) {
+          state.resumeArm = false;
+          setTimeout(() => { if (!state.isArmed) toggleArmMonitor(); state.persistReady = true; }, 1200);
+        } else {
+          state.persistReady = true;
+        }
+      } catch (err) {
+        document.getElementById('cameraErrorText').textContent =
+          'Screen sharing did not start (' + (err.name || 'error') + '). Click Share screen and choose the Outlook window or your whole screen.';
+        overlay.classList.remove('hidden');
+      }
     }
 
     function switchCamera() {
@@ -1575,12 +1658,12 @@
       if (video.paused && state.stream) video.play().catch(() => {});
       const t = state.videoTrack;
       const dead = !t || t.readyState !== 'live';
-      const frozen = !dead && video.currentTime === state.wdLastTime;
+      const frozen = !dead && state.sourceMode !== 'screen' && video.currentTime === state.wdLastTime;
       state.wdLastTime = video.currentTime;
       if (dead || frozen) state.wdStale++;
       else { state.wdStale = 0; clearFault('camera'); }
-      if (state.wdStale === 2) initCamera();            // first try a silent restart
-      if (state.wdStale >= 4) setFault('camera', 'Camera feed stopped. Monitoring is not working. Check the phone.');
+      if (state.wdStale === 2 && state.sourceMode !== 'screen') initCamera();            // first try a silent restart
+      if (state.wdStale >= 4) setFault('camera', state.sourceMode === 'screen' ? 'Screen sharing stopped. Click Share screen to resume. Monitoring is not working.' : 'Camera feed stopped. Monitoring is not working. Check the phone.');
       if (state.audioCtx && state.audioCtx.state !== 'running') {
         state.audioCtx.resume().catch(() => {});
         setFault('audio', 'Alarm sound is blocked. Tap anywhere on the screen to enable it.', false);
@@ -1598,7 +1681,7 @@
       if (!state.persistReady) return;
       try {
         localStorage.setItem('roi_night_monitor_setup', JSON.stringify({
-          roi: state.roi, zoom: state.zoomLevel, armed: state.isArmed
+          roi: state.roi, zoom: state.zoomLevel, armed: state.isArmed, mode: state.sourceMode
         }));
       } catch (e) {}
     }
@@ -1614,6 +1697,7 @@
         }
         if (d.zoom > 1) state.savedZoom = d.zoom;
         state.resumeArm = d.armed === true;
+        if (d.mode === 'screen' && navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) state.sourceMode = 'screen';
       } catch (e) {}
     }
     function afterCameraReady() {
@@ -1646,7 +1730,8 @@
       loadLocalPrefs();
       loadSetup();
       initBatteryMonitor();
-      initCamera();
+      applySourceUI();
+      if (state.sourceMode !== 'screen') initCamera();
       if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
     });
   </script>
