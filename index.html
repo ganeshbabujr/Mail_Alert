@@ -147,11 +147,6 @@
 
     <button id="faultBanner" onclick="ackFaults()" role="status" aria-live="polite" class="hidden w-full text-left px-3 py-2.5 rounded-xl bg-amber-500/15 border border-amber-400/50 text-amber-200 text-xs font-semibold"></button>
 
-    <div id="sourceTabs" role="tablist" class="grid grid-cols-2 gap-1 p-1 bg-zinc-900 rounded-xl border border-zinc-800">
-      <button id="srcCamBtn" role="tab" onclick="setSourceMode('camera')">📱 Phone camera</button>
-      <button id="srcScrBtn" role="tab" onclick="setSourceMode('screen')">🖥️ Laptop screen</button>
-    </div>
-
     <!-- CAMERA VIEWPORT CARD -->
     <div class="relative rounded-xl overflow-hidden bg-black border border-zinc-800 shadow-lg aspect-[4/3] w-full">
       <!-- Live Video Element (scaled via CSS when using software crop/zoom fallback) -->
@@ -199,7 +194,7 @@
       <!-- Camera Permission / Error Overlay -->
       <div id="cameraOverlayMsg" class="hidden absolute inset-0 bg-zinc-950/95 flex flex-col items-center justify-center p-4 text-center z-20">
         <p id="cameraErrorText" class="text-xs text-zinc-300 mb-3">Rear camera access is required to watch your monitor folder or alert icon.</p>
-        <button id="overlayActionBtn" onclick="startSource()" class="px-4 py-2 rounded-lg bg-cyan-400 text-zinc-950 font-bold text-xs"><span id="overlayActionText">Enable Rear Camera</span></button>
+        <button id="overlayActionBtn" onclick="initCamera()" class="px-4 py-2 rounded-lg bg-cyan-400 text-zinc-950 font-bold text-xs"><span id="overlayActionText">Enable Rear Camera</span></button>
       </div>
     </div>
 
@@ -498,7 +493,7 @@
       isBlackoutAlert: false,
       isTestSiren: false,
       sirenMuted: false,
-      faults: {}, faultTimer: null, sourceMode: 'camera', chargerTimer: null,
+      faults: {}, faultTimer: null, chargerTimer: null, micFloor: 5, micTimer: null, holdOffUntil: 0, blackoutOk: 0,
       wdLastTime: -1, wdStale: 0,
       savedZoom: null, resumeArm: false, persistReady: false,
       master: null, escTimer: null, alarmStart: 0, escalated: false, modeOverride: null,
@@ -609,7 +604,7 @@
       const vw = video.videoWidth, vh = video.videoHeight;
       const cw = video.clientWidth || 1, ch = video.clientHeight || 1;
       const z = state.supportsHardwareZoom ? 1 : state.zoomLevel;
-      const sc = state.sourceMode === 'screen' ? Math.min(cw / vw, ch / vh) : Math.max(cw / vw, ch / vh);
+      const sc = Math.max(cw / vw, ch / vh); // object-cover scale
       const ox = (cw - vw * sc) / 2, oy = (ch - vh * sc) / 2;
       const map = (x, y) => [((cw / 2 + (x - cw / 2) / z) - ox) / sc, ((ch / 2 + (y - ch / 2) / z) - oy) / sc];
       const [x0, y0] = map(state.roi.x * cw, state.roi.y * ch);
@@ -633,86 +628,6 @@
         adv = { exposureMode: 'continuous' };
       }
       if (adv) { try { await t.applyConstraints({ advanced: [adv] }); } catch (e) {} }
-    }
-
-    function applySourceUI() {
-      const scr = state.sourceMode === 'screen';
-      const canShare = !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
-      document.getElementById('sourceTabs').classList.toggle('hidden', !canShare);
-      const on = 'py-2 rounded-lg text-xs font-bold bg-cyan-400 text-zinc-950';
-      const off = 'py-2 rounded-lg text-xs font-semibold text-zinc-300';
-      document.getElementById('srcCamBtn').className = scr ? off : on;
-      document.getElementById('srcScrBtn').className = scr ? on : off;
-      document.getElementById('srcCamBtn').setAttribute('aria-selected', String(!scr));
-      document.getElementById('srcScrBtn').setAttribute('aria-selected', String(scr));
-      video.style.objectFit = scr ? 'contain' : 'cover';
-      video.style.transform = 'scale(1)';
-      state.zoomLevel = 1;
-      document.getElementById('camControls').classList.toggle('hidden', scr);
-      roiBox.parentElement.style.aspectRatio = '';
-      document.getElementById('overlayActionText').textContent = scr ? 'Share screen' : 'Enable Rear Camera';
-      if (scr) {
-        document.getElementById('cameraErrorText').textContent =
-          'Click Share screen, then pick the Outlook window (or your whole screen). Drag the box over the folder badge.';
-        if (!state.stream) document.getElementById('cameraOverlayMsg').classList.remove('hidden');
-        document.getElementById('subStatusText').textContent = 'Watching a shared laptop screen';
-      } else {
-        document.getElementById('cameraErrorText').textContent = 'Rear camera access is required to watch your monitor folder or alert icon.';
-        document.getElementById('subStatusText').textContent = '100% Offline Local Screen Watcher';
-      }
-    }
-
-    function setSourceMode(mode) {
-      if (mode === state.sourceMode) return;
-      if (state.isArmed) toggleArmMonitor();
-      if (state.stream) { state.stream.getTracks().forEach(t => t.stop()); state.stream = null; state.videoTrack = null; }
-      video.srcObject = null;
-      state.sourceMode = mode;
-      state.frameBuffer = [];
-      state.baselineFrame = null;
-      applySourceUI();
-      startSource();
-    }
-
-    function startSource() {
-      if (state.sourceMode === 'screen') startScreenCapture(); else initCamera();
-    }
-
-    async function startScreenCapture() {
-      const overlay = document.getElementById('cameraOverlayMsg');
-      try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 5, max: 10 } }, audio: false });
-        if (state.stream) state.stream.getTracks().forEach(t => t.stop());
-        state.stream = stream;
-        state.frameBuffer = [];
-        state.baselineFrame = null;
-        video.srcObject = stream;
-        await video.play().catch(() => {});
-        if (!video.videoWidth) await new Promise(r => { video.onloadedmetadata = () => r(); setTimeout(r, 2000); });
-        if (video.videoWidth) roiBox.parentElement.style.aspectRatio = video.videoWidth + ' / ' + video.videoHeight;
-        overlay.classList.add('hidden');
-        const [track] = stream.getVideoTracks();
-        state.videoTrack = track;
-        state.supportsHardwareZoom = false;
-        state.supportsTorch = false;
-        track.addEventListener('ended', () => {
-          if (state.videoTrack !== track) return;
-          setFault('camera', 'Screen sharing stopped. Click Share screen to resume. Monitoring is not working.');
-          document.getElementById('cameraErrorText').textContent = 'Screen sharing stopped. Click Share screen and pick the Outlook window again.';
-          overlay.classList.remove('hidden');
-        });
-        clearFault('camera');
-        if (state.resumeArm) {
-          state.resumeArm = false;
-          setTimeout(() => { if (!state.isArmed) toggleArmMonitor(); state.persistReady = true; }, 1200);
-        } else {
-          state.persistReady = true;
-        }
-      } catch (err) {
-        document.getElementById('cameraErrorText').textContent =
-          'Screen sharing did not start (' + (err.name || 'error') + '). Click Share screen and choose the Outlook window or your whole screen.';
-        overlay.classList.remove('hidden');
-      }
     }
 
     function switchCamera() {
@@ -929,6 +844,7 @@
       const currentGray = getAveragedFrame();
       if (!currentGray) return;
       state.baselineFrame = new Uint8ClampedArray(currentGray);
+      state.holdOffUntil = Date.now() + 800;
       state.consecutiveHits = 0;
       state.blackoutHits = 0;
       renderGrayscaleToCanvas(state.baselineFrame, baseCtx);
@@ -1004,7 +920,13 @@
       updateTelemetryHUD(diffPct);
 
       // Check Laptop Screen Blackout Guard ("Dead-Man's Switch")
-      if (state.isArmed && !state.isAlarming && !state.isBlackoutAlert) {
+      // Laptop screen woke up by itself: clear the amber alert and re-baseline
+      if (state.isBlackoutAlert) {
+        if (state.currentLum >= state.blackoutCutoff * 1.3) {
+          if (++state.blackoutOk >= 8) { state.blackoutOk = 0; dismissBlackoutAlert(); }
+        } else state.blackoutOk = 0;
+      }
+      if (state.isArmed && !state.isAlarming && !state.isBlackoutAlert && Date.now() >= state.holdOffUntil) {
         const guardEnabled = document.getElementById('blackoutGuardToggle').checked;
         if (guardEnabled && state.currentLum < state.blackoutCutoff) {
           state.blackoutHits++;
@@ -1154,7 +1076,7 @@
       if (mode === 'voice') {
         if ('speechSynthesis' in window) {
           window.speechSynthesis.cancel();
-          const utter = new SpeechSynthesisUtterance(`Alert! ${state.roiLabel} folder changed on monitor!`);
+          const utter = new SpeechSynthesisUtterance(`Alert! ${state.roiLabel} changed!`);
           utter.rate = 1.05;
           utter.pitch = 1.1;
           window.speechSynthesis.speak(utter);
@@ -1207,7 +1129,7 @@
 
       const mode = state.modeOverride || document.getElementById('soundModeSelect').value;
       let toggleFlag = true;
-      const intervalMs = mode === 'voice' ? 3200 : mode === 'sonar' ? 850 : 380;
+      const intervalMs = mode === 'voice' ? 3600 : mode === 'sonar' ? 850 : 380;
 
       playSingleAlarmCycle(mode, toggleFlag);
       state.sirenInterval = setInterval(() => {
@@ -1256,15 +1178,17 @@
           state.sirenMuted = true;
           state.mutedAt = Date.now();
           if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-          setTimeout(() => { state.sirenMuted = false; }, 750);
-        }, 2400);
+          setTimeout(() => { state.sirenMuted = false; }, mode === 'voice' ? 1300 : 750);
+        }, mode === 'voice' ? 6500 : 2400);
       }
     }
 
     function stopSirenAndVibration() {
       clearInterval(state.escTimer);
+      state.escTimer = null;
       if (state.master) { state.master.gain.cancelScheduledValues(state.audioCtx.currentTime); state.master.gain.setValueAtTime(1, state.audioCtx.currentTime); }
       clearInterval(state.gapTimer);
+      state.gapTimer = null;
       state.sirenMuted = false;
       if (state.sirenInterval) {
         clearInterval(state.sirenInterval);
@@ -1346,6 +1270,7 @@
       document.getElementById('alarmSnapshotImg').src = snapshotUrl;
       document.getElementById('alarmModal').classList.remove('hidden');
 
+      if (state.isTestSiren) toggleTestSiren();
       startSirenAndVibration();
       appendEventLog(nowStr, diffPct, snapshotUrl, 'TRIGGER');
     }
@@ -1379,6 +1304,8 @@
       state.consecutiveHits = 0;
       state.clapSpikes = 0;
       recaptureBaseline();
+      setTimeout(recaptureBaseline, 1500);
+      state.holdOffUntil = Date.now() + 2000;
       roiBox.classList.remove('roi-triggered');
       document.getElementById('alarmModal').classList.add('hidden');
     }
@@ -1399,16 +1326,17 @@
       if (state.micStream) return;
       try {
         ensureAudioContext();
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }, video: false });
         state.micStream = stream;
         const source = state.audioCtx.createMediaStreamSource(stream);
         const analyser = state.audioCtx.createAnalyser();
-        analyser.fftSize = 256;
+        analyser.fftSize = 2048; // 46 ms window; old 256 saw only 6 ms of every 90 ms
         source.connect(analyser);
         state.micAnalyser = analyser;
 
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        setInterval(() => {
+        const dataArray = new Uint8Array(analyser.fftSize);
+        clearInterval(state.micTimer);
+        state.micTimer = setInterval(() => {
           if (!state.micAnalyser || !document.getElementById('clapSnoozeToggle').checked) return;
           state.micAnalyser.getByteTimeDomainData(dataArray);
           let maxPeak = 0;
@@ -1422,7 +1350,9 @@
           // Detect sharp acoustic spike (clap or loud shout > 72% peak)
           const now = Date.now();
           const listening = !state.isAlarming || (state.sirenMuted && now - state.mutedAt > 150);
-          if (listening && pct >= 72 && now - state.lastClapTime > 280) {
+          const thr = Math.min(75, Math.max(38, state.micFloor * 3.5)); // adapts to room noise
+          if (pct < thr * 0.6) state.micFloor = state.micFloor * 0.98 + pct * 0.02;
+          if (listening && pct >= thr && now - state.lastClapTime > 280) {
             state.lastClapTime = now;
             state.clapSpikes++;
             document.getElementById('clapCountVal').textContent = `${state.clapSpikes}/2`;
@@ -1437,7 +1367,7 @@
               }
             }, 3500);
           }
-        }, 90);
+        }, 40);
       } catch (e) {
         document.getElementById('micLevelVal').textContent = 'Mic Denied';
       }
@@ -1496,6 +1426,7 @@
         state.wakeLock.addEventListener('release', () => {
           wakeIcon.textContent = '🌙';
           wakeText.textContent = 'Sleep OK';
+          if (state.isArmed && document.visibilityState === 'visible') setTimeout(requestWakeLock, 2000);
           wakeBtn.className = 'flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium bg-zinc-900 border border-zinc-800 text-zinc-400';
         });
       } catch (e) {
@@ -1506,6 +1437,7 @@
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && state.isArmed) {
         requestWakeLock();
+        video.play().catch(() => {});
       }
     });
 
@@ -1656,14 +1588,18 @@
     function watchdogTick() {
       if (!state.isArmed) return;
       if (video.paused && state.stream) video.play().catch(() => {});
+      if (state.micStream && state.micStream.getTracks().some(t => t.readyState === 'ended')) {
+        state.micStream = null;
+        if (document.getElementById('clapSnoozeToggle').checked) initClapMicrophone();
+      }
       const t = state.videoTrack;
       const dead = !t || t.readyState !== 'live';
-      const frozen = !dead && state.sourceMode !== 'screen' && video.currentTime === state.wdLastTime;
+      const frozen = !dead && video.currentTime === state.wdLastTime;
       state.wdLastTime = video.currentTime;
       if (dead || frozen) state.wdStale++;
       else { state.wdStale = 0; clearFault('camera'); }
-      if (state.wdStale === 2 && state.sourceMode !== 'screen') initCamera();            // first try a silent restart
-      if (state.wdStale >= 4) setFault('camera', state.sourceMode === 'screen' ? 'Screen sharing stopped. Click Share screen to resume. Monitoring is not working.' : 'Camera feed stopped. Monitoring is not working. Check the phone.');
+      if (state.wdStale === 2) initCamera();            // first try a silent restart
+      if (state.wdStale >= 4) setFault('camera', 'Camera feed stopped. Monitoring is not working. Check the phone.');
       if (state.audioCtx && state.audioCtx.state !== 'running') {
         state.audioCtx.resume().catch(() => {});
         setFault('audio', 'Alarm sound is blocked. Tap anywhere on the screen to enable it.', false);
@@ -1681,7 +1617,7 @@
       if (!state.persistReady) return;
       try {
         localStorage.setItem('roi_night_monitor_setup', JSON.stringify({
-          roi: state.roi, zoom: state.zoomLevel, armed: state.isArmed, mode: state.sourceMode
+          roi: state.roi, zoom: state.zoomLevel, armed: state.isArmed
         }));
       } catch (e) {}
     }
@@ -1697,7 +1633,6 @@
         }
         if (d.zoom > 1) state.savedZoom = d.zoom;
         state.resumeArm = d.armed === true;
-        if (d.mode === 'screen' && navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) state.sourceMode = 'screen';
       } catch (e) {}
     }
     function afterCameraReady() {
@@ -1730,8 +1665,7 @@
       loadLocalPrefs();
       loadSetup();
       initBatteryMonitor();
-      applySourceUI();
-      if (state.sourceMode !== 'screen') initCamera();
+      initCamera();
       if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
     });
   </script>
